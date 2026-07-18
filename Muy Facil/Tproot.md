@@ -1,4 +1,3 @@
-
 ---
 title: "Dockerlabs — Tproot: ¡Jugando con el mítico vsftpd 2.3.4!"
 date: 2026-07-13 12:00:00 +/-0100
