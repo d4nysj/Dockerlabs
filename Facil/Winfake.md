@@ -1,7 +1,5 @@
 # WinFake — DockerLabs (Fácil)
 
-![maquina](https://github.com/Aguilar-aoj/Pentesting/blob/main/_visuales/DockerLabs/Facil/WinFake/maquina.png?raw=true)
-
 A veces la primera pista de que algo no cuadra no está en un puerto ni en un exploit, sino en el propio disfraz de la máquina. **WinFake** se presenta como un servidor Windows, con un banner de PowerShell y una bienvenida de Microsoft, pero por debajo hay un Ubuntu bastante normal fingiendo ser otra cosa. El reto está en no fiarse de las apariencias: la web principal esconde un mensaje cifrado a la vista, y ese mensaje termina siendo la clave (literal) para llegar a root.
 
 - **Dificultad:** Fácil
@@ -33,8 +31,6 @@ Dos puertos abiertos:
 
 ## Enumeración Web (Puerto 80)
 
-![puerto80](https://github.com/Aguilar-aoj/Pentesting/blob/main/_visuales/DockerLabs/Facil/WinFake/puerto80.png?raw=true)
-
 La web simula un portal de noticias tipo *Daily News*. Nada llamativo a simple vista, pero al leer los titulares con más calma se aprecia un patrón: la primera letra de cada titular, leída en orden, forma una palabra oculta:
 
 ```
@@ -44,8 +40,6 @@ WINSERVERROOTFAKENEWS
 Un acróstico bastante explícito para tratarse de una "casualidad" — claramente puesto ahí como pista.
 
 ### Revisión del código fuente
-
-![code-puerto80](https://github.com/Aguilar-aoj/Pentesting/blob/main/_visuales/DockerLabs/Facil/WinFake/code-puerto80.png?raw=true)
 
 Revisando el CSS de la página aparece una inconsistencia: en la propiedad `top` del selector `body`, en vez de un valor numérico con unidad (`px`, `em`, etc.), hay un valor de texto: **`pipe`**. Una propiedad CSS de posicionamiento no acepta ese tipo de valor, así que solo puede tratarse de un dato colado a propósito — muy probablemente un nombre de usuario.
 
